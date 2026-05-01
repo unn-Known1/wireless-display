@@ -1,0 +1,4 @@
+#!/bin/bash
+# Pre-installation script
+# (No pre-install actions needed)
+exit 0

@@ -1,0 +1,7 @@
+androidTvApp/
+linuxReceiver/
+build/
+*.apk
+*.deb
+.gradle/
+local.properties

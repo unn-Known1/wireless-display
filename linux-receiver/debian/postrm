@@ -1,0 +1,10 @@
+#!/bin/bash
+# Post-removal script
+
+# Clean up desktop entry
+rm -f ~/.local/share/applications/wireless-display-receiver.desktop 2>/dev/null || true
+
+# Update desktop database
+update-desktop-database ~/.local/share/applications 2>/dev/null || true
+
+exit 0

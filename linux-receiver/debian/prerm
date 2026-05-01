@@ -1,0 +1,4 @@
+#!/bin/bash
+# Pre-removal script
+pkill -f wireless-display-receiver.py 2>/dev/null || true
+exit 0

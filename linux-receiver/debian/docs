@@ -1,0 +1,10 @@
+Format: 3.0 (quilt)
+Source: wireless-display-receiver
+Binary: wireless-display-receiver
+Architecture: any
+Version: 1.0.0
+Maintainer: Wireless Display Team
+Description: Use Android TV as secondary display over WiFi
+
+Files:
+/opt/wireless-display/receiver/wireless-display-receiver.py usr/share/wireless-display/
