@@ -1,358 +1,241 @@
 #!/usr/bin/env python3
 """
-Wireless Display Receiver for Linux Mint
-VNC Server + PyQt6 UI for virtual display management
+Wireless Display Receiver
+VNC server that streams desktop to Android TV
 """
 
-import sys
 import socket
 import threading
 import struct
-import zlib
-import argparse
-import json
-import os
-from datetime import datetime
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QLabel, QPushButton, QLineEdit,
-                             QTextEdit, QSystemTrayIcon, QMenu, QMessageBox,
-                             QGroupBox, QComboBox, QCheckBox)
-from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt
-from PyQt6.QtGui import QIcon, QAction, QPainter, QColor, QBrush, QPen
+import sys
+import time
+import subprocess
+from io import BytesIO
+from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
+from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtGui import QIcon, QAction
 
-# Constants
-DEFAULT_PORT = 5900
-DEFAULT_WIDTH = 1920
-DEFAULT_HEIGHT = 1080
-DEFAULT_BPP = 32
+# VNC Protocol Constants
+RFB_VERSION = b'RFB 003.008\n'
+CLIENT_INIT = 0
+SERVER_INIT = 1
+SET_PIXEL_FORMAT = 0
+SET_ENCODINGS = 2
+FRAMEBUFFER_UPDATE_REQUEST = 3
+KEY_EVENT = 4
+POINTER_EVENT = 5
+CLIENT_CUT_TEXT = 6
+
+ENCODING_RAW = 0
+ENCODING_COPY_RECT = 1
+ENCODING_DESKTOP_SIZE = -223
 
 class VNCServer:
-    """Minimal RFB (VNC) Protocol Server"""
-
-    def __init__(self, port=DEFAULT_PORT, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT):
+    def __init__(self, host='0.0.0.0', port=5900):
+        self.host = host
         self.port = port
-        self.width = width
-        self.height = height
-        self.clients = []
+        self.client_socket = None
         self.running = False
-        self.server_socket = None
-        self.lock = threading.Lock()
-
+        self.width = 1920
+        self.height = 1080
+        self.framebuffer = None
+        
     def start(self):
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server_socket.bind(('0.0.0.0', self.port))
-        self.server_socket.listen(5)
+        self.server_socket.bind((self.host, self.port))
+        self.server_socket.listen(1)
         self.server_socket.settimeout(1.0)
         self.running = True
-
-    def stop(self):
-        self.running = False
-        with self.lock:
-            for client in self.clients:
-                try:
-                    client.close()
-                except:
-                    pass
-            self.clients.clear()
-        if self.server_socket:
-            self.server_socket.close()
-
-    def handle_client(self, client_socket, addr):
-        try:
-            client_socket.send(b'RFB 003.008\n')
-            version = client_socket.recv(12)
-            client_socket.send(b'\x01\x00')
-            shared = client_socket.recv(1)
-            self.send_server_init(client_socket)
-            while self.running:
-                try:
-                    msg_type = client_socket.recv(1)
-                    if not msg_type:
-                        break
-                    msg_type = ord(msg_type)
-                    if msg_type == 0:
-                        client_socket.recv(3)
-                        client_socket.recv(16)
-                    elif msg_type == 2:
-                        client_socket.recv(1)
-                        count = struct.unpack('!H', client_socket.recv(2))[0]
-                        client_socket.recv(count * 4)
-                    elif msg_type == 3:
-                        incremental = client_socket.recv(1)
-                        x = struct.unpack('!H', client_socket.recv(2))[0]
-                        y = struct.unpack('!H', client_socket.recv(2))[0]
-                        w = struct.unpack('!H', client_socket.recv(2))[0]
-                        h = struct.unpack('!H', client_socket.recv(2))[0]
-                        self.send_framebuffer_update(client_socket, x, y, w, h)
-                    elif msg_type == 4:
-                        client_socket.recv(7)
-                    elif msg_type == 5:
-                        client_socket.recv(5)
-                    elif msg_type == 6:
-                        client_socket.recv(3)
-                        length = struct.unpack('!I', client_socket.recv(4))[0]
-                        client_socket.recv(length)
-                except:
-                    break
-        except:
-            pass
-        finally:
-            client_socket.close()
-            with self.lock:
-                if client_socket in self.clients:
-                    self.clients.remove(client_socket)
-
-    def send_server_init(self, client_socket):
-        client_socket.send(struct.pack('!H', self.width))
-        client_socket.send(struct.pack('!H', self.height))
-        name = 'Wireless Display'
-        client_socket.send(struct.pack('!B', 0))
-        client_socket.send(struct.pack('!BBHHHBBBBBBBBB',
-            DEFAULT_BPP, 0, 1, 255, 255, 255, 16, 8, 0))
-        client_socket.send(struct.pack('!BBB', 0, 0, 0))
-        client_socket.send(struct.pack('!I', len(name)))
-        client_socket.send(name.encode())
-
-    def send_framebuffer_update(self, client_socket, x, y, w, h):
-        client_socket.send(struct.pack('!B', 0))
-        client_socket.send(struct.pack('!B', 0))
-        client_socket.send(struct.pack('!H', 1))
-        client_socket.send(struct.pack('!H', x))
-        client_socket.send(struct.pack('!H', y))
-        client_socket.send(struct.pack('!H', w))
-        client_socket.send(struct.pack('!H', h))
-        client_socket.send(struct.pack('!i', 0))
-        pixels = []
-        for row in range(h):
-            for col in range(w):
-                r = int(30 + (col / w) * 30)
-                g = int(30 + (row / h) * 30)
-                b = int(80 + ((col + row) / (w + h)) * 40)
-                pixels.extend([r, g, b, 255])
-        client_socket.send(bytes(pixels))
-
-    def accept_client(self):
+        print(f"VNC Server started on {self.host}:{self.port}")
+        
         while self.running:
             try:
-                client_socket, addr = self.server_socket.accept()
-                with self.lock:
-                    self.clients.append(client_socket)
-                thread = threading.Thread(target=self.handle_client, args=(client_socket, addr))
-                thread.daemon = True
-                thread.start()
+                client, addr = self.server_socket.accept()
+                print(f"Client connected from {addr}")
+                threading.Thread(target=self.handle_client, args=(client,)).start()
             except socket.timeout:
                 continue
-            except:
-                if self.running:
-                    pass
-
-class ServerThread(QThread):
-    log_signal = pyqtSignal(str)
-    status_signal = pyqtSignal(bool)
-
-    def __init__(self, port, width, height):
-        super().__init__()
-        self.port = port
-        self.width = width
-        self.height = height
-        self.server = None
-        self.running = False
-
-    def run(self):
-        self.server = VNCServer(self.port, self.width, self.height)
-        self.running = True
+            except Exception as e:
+                print(f"Error: {e}")
+                break
+    
+    def handle_client(self, client):
         try:
-            self.server.start()
-            self.status_signal.emit(True)
-            self.log_signal.emit(f"Server started on port {self.port}")
-            self.server.accept_client()
+            # Version handshake
+            client.sendall(RFB_VERSION)
+            version = client.recv(12)
+            print(f"Client version: {version.decode()}")
+            
+            # Security handshake (no auth)
+            client.sendall(b'\x01\x01')  # 1 type, no security
+            client.sendall(b'\x00\x00\x00\x00')  # Accept
+            
+            # Client init (shared flag)
+            shared = client.recv(1)
+            
+            # Server init
+            self.send_server_init(client)
+            
+            # Handle client messages
+            while self.running:
+                msg_type = client.recv(1)
+                if not msg_type:
+                    break
+                self.handle_message(client, msg_type[0])
+                
         except Exception as e:
-            self.log_signal.emit(f"Server error: {e}")
-            self.status_signal.emit(False)
-
+            print(f"Client error: {e}")
+        finally:
+            client.close()
+            print("Client disconnected")
+    
+    def send_server_init(self, client):
+        # Framebuffer size
+        name = b"Wireless Display"
+        name_len = len(name)
+        
+        # Security result (accepted)
+        # Already sent earlier
+        
+        # Server init
+        msg = struct.pack('>HH', self.width, self.height)
+        msg += struct.pack('!BBBBHHHBBB', 
+            32,  # bits per pixel
+            24,  # depth
+            0,   # big endian
+            1,   # true color
+            255, # red max
+            255, # green max
+            255, # blue max
+            16,  # red shift
+            8,   # green shift
+            0    # blue shift
+        )
+        msg += struct.pack('!BBB', 0, 0, 0)  # padding
+        msg += struct.pack('>I', name_len)
+        msg += name
+        client.sendall(msg)
+    
+    def handle_message(self, client, msg_type):
+        if msg_type == SET_PIXEL_FORMAT:
+            client.recv(19)  # Skip pixel format
+        elif msg_type == SET_ENCODINGS:
+            count = struct.unpack('!H', client.recv(2))[0]
+            client.recv(count * 4)  # Skip encodings
+        elif msg_type == FRAMEBUFFER_UPDATE_REQUEST:
+            client.recv(1)  # Skip incremental
+            x, y, w, h = struct.unpack('!HHHH', client.recv(8))
+            self.send_framebuffer_update(client)
+        elif msg_type == KEY_EVENT or msg_type == POINTER_EVENT or msg_type == CLIENT_CUT_TEXT:
+            # Skip for now
+            pass
+    
+    def send_framebuffer_update(self, client):
+        # Header
+        msg = struct.pack('!Bx', FRAMEBUFFER_UPDATE_REQUEST)  # 0
+        msg += struct.pack('!H', 1)  # 1 rectangle
+        
+        # Rectangle header
+        msg += struct.pack('!HHHH', 0, 0, self.width, self.height)
+        msg += struct.pack('!i', ENCODING_RAW)
+        
+        # Pixel data (simple gradient for demo)
+        try:
+            # Try to get screenshot
+            result = subprocess.run(
+                ['scrot', '-o', '-'],
+                capture_output=True,
+                timeout=2
+            )
+            if result.returncode == 0:
+                # Convert to raw RGB
+                from PIL import Image
+                import io
+                img = Image.open(io.BytesIO(result.stdout))
+                img = img.resize((self.width, self.height))
+                img = img.convert('RGB')
+                pixels = img.tobytes()
+            else:
+                pixels = self.generate_fallback_frame()
+        except Exception:
+            pixels = self.generate_fallback_frame()
+        
+        msg += pixels
+        client.sendall(msg)
+    
+    def generate_fallback_frame(self):
+        """Generate a simple fallback frame"""
+        pixels = bytearray()
+        for y in range(self.height):
+            for x in range(self.width):
+                # Gradient pattern
+                r = int((x / self.width) * 255)
+                g = int((y / self.height) * 255)
+                b = 128
+                pixels.extend([r, g, b])
+        return bytes(pixels)
+    
     def stop(self):
         self.running = False
-        if self.server:
-            self.server.stop()
+        if hasattr(self, 'server_socket'):
+            self.server_socket.close()
 
-class MainWindow(QMainWindow):
+
+class TrayApp:
     def __init__(self):
-        super().__init__()
+        self.app = QApplication(sys.argv)
+        self.server = VNCServer()
         self.server_thread = None
-        self.settings_file = os.path.expanduser('~/.wireless-display-receiver.json')
-        self.load_settings()
-        self.init_ui()
-        self.init_tray()
-
-    def load_settings(self):
-        try:
-            if os.path.exists(self.settings_file):
-                with open(self.settings_file, 'r') as f:
-                    self.settings = json.load(f)
-            else:
-                self.settings = {
-                    'port': DEFAULT_PORT,
-                    'width': DEFAULT_WIDTH,
-                    'height': DEFAULT_HEIGHT,
-                    'auto_start': False
-                }
-        except:
-            self.settings = {
-                'port': DEFAULT_PORT,
-                'width': DEFAULT_WIDTH,
-                'height': DEFAULT_HEIGHT,
-                'auto_start': False
-            }
-
-    def save_settings(self):
-        try:
-            with open(self.settings_file, 'w') as f:
-                json.dump(self.settings, f, indent=2)
-        except:
-            pass
-
-    def init_ui(self):
-        self.setWindowTitle('Wireless Display Receiver')
-        self.setMinimumWidth(500)
-        self.setMinimumHeight(400)
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        layout = QVBoxLayout()
-        status_group = QGroupBox("Server Status")
-        status_layout = QVBoxLayout()
-        self.status_label = QLabel("Status: Stopped")
-        self.status_label.setStyleSheet("font-size: 14pt; font-weight: bold;")
-        status_layout.addWidget(self.status_label)
-        self.ip_label = QLabel("IP: --")
-        status_layout.addWidget(self.ip_label)
-        self.port_label = QLabel(f"Port: {self.settings['port']}")
-        status_layout.addWidget(self.port_label)
-        status_group.setLayout(status_layout)
-        layout.addWidget(status_group)
-        controls_layout = QHBoxLayout()
-        self.start_button = QPushButton("Start Server")
-        self.start_button.clicked.connect(self.start_server)
-        controls_layout.addWidget(self.start_button)
-        self.stop_button = QPushButton("Stop Server")
-        self.stop_button.clicked.connect(self.stop_server)
-        self.stop_button.setEnabled(False)
-        controls_layout.addWidget(self.stop_button)
-        layout.addLayout(controls_layout)
-        settings_group = QGroupBox("Settings")
-        settings_layout = QVBoxLayout()
-        resolution_layout = QHBoxLayout()
-        resolution_layout.addWidget(QLabel("Resolution:"))
-        self.resolution_combo = QComboBox()
-        self.resolution_combo.addItems(['1920x1080', '1280x720', '1600x900', '1366x768'])
-        self.resolution_combo.setCurrentText(f"{self.settings['width']}x{self.settings['height']}")
-        resolution_layout.addWidget(self.resolution_combo)
-        resolution_layout.addStretch()
-        settings_layout.addLayout(resolution_layout)
-        port_layout = QHBoxLayout()
-        port_layout.addWidget(QLabel("Port:"))
-        self.port_input = QLineEdit(str(self.settings['port']))
-        port_layout.addWidget(self.port_input)
-        port_layout.addStretch()
-        settings_layout.addLayout(port_layout)
-        self.auto_start_check = QCheckBox("Start server on application launch")
-        self.auto_start_check.setChecked(self.settings.get('auto_start', False))
-        settings_layout.addWidget(self.auto_start_check)
-        settings_group.setLayout(settings_layout)
-        layout.addWidget(settings_group)
-        log_group = QGroupBox("Activity Log")
-        log_layout = QVBoxLayout()
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setMaximumHeight(150)
-        log_layout.addWidget(self.log_text)
-        log_group.setLayout(log_layout)
-        layout.addWidget(log_group)
-        central_widget.setLayout(layout)
-        self.update_local_ip()
-
-    def init_tray(self):
-        self.tray = QSystemTrayIcon(self)
+        
+        # Setup tray
+        self.tray = QSystemTrayIcon()
         self.tray.setToolTip("Wireless Display Receiver")
+        
+        # Create menu
         menu = QMenu()
-        menu.addAction("Show", self.show)
-        menu.addAction("Hide", self.hide)
+        
+        self.status_action = QAction("Status: Stopped")
+        self.status_action.setEnabled(False)
+        menu.addAction(self.status_action)
+        
         menu.addSeparator()
-        menu.addAction("Quit", self.quit_app)
+        
+        start_action = QAction("Start Server")
+        start_action.triggered.connect(self.start_server)
+        menu.addAction(start_action)
+        
+        stop_action = QAction("Stop Server")
+        stop_action.triggered.connect(self.stop_server)
+        menu.addAction(stop_action)
+        
+        menu.addSeparator()
+        
+        quit_action = QAction("Quit")
+        quit_action.triggered.connect(self.quit)
+        menu.addAction(quit_action)
+        
         self.tray.setContextMenu(menu)
-        self.tray.activated.connect(self.tray_clicked)
-
-    def tray_clicked(self, reason):
-        if reason == QSystemTrayIcon.DoubleClick:
-            self.show()
-
-    def update_local_ip(self):
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            self.ip_label.setText(f"IP: {ip}")
-        except:
-            self.ip_label.setText("IP: Unable to detect")
-
+        self.tray.show()
+    
     def start_server(self):
-        try:
-            port = int(self.port_input.text())
-            resolution = self.resolution_combo.currentText().split('x')
-            width, height = int(resolution[0]), int(resolution[1])
-            self.settings['port'] = port
-            self.settings['width'] = width
-            self.settings['height'] = height
-            self.settings['auto_start'] = self.auto_start_check.isChecked()
-            self.save_settings()
-            self.log("Starting server...")
-            self.server_thread = ServerThread(port, width, height)
-            self.server_thread.log_signal.connect(self.log)
-            self.server_thread.status_signal.connect(self.on_server_status)
-            self.server_thread.start()
-            self.start_button.setEnabled(False)
-            self.stop_button.setEnabled(True)
-        except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to start server: {e}")
-
+        self.server_thread = threading.Thread(target=self.server.start)
+        self.server_thread.daemon = True
+        self.server_thread.start()
+        self.status_action.setText("Status: Running")
+    
     def stop_server(self):
-        if self.server_thread:
-            self.server_thread.stop()
-            self.server_thread.wait()
-            self.server_thread = None
-        self.log("Server stopped")
-        self.status_label.setText("Status: Stopped")
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
+        self.server.stop()
+        self.status_action.setText("Status: Stopped")
+    
+    def quit(self):
+        self.stop_server()
+        self.app.quit()
+    
+    def run(self):
+        return self.app.exec()
 
-    def on_server_status(self, running):
-        if running:
-            self.status_label.setText("Status: Running")
-            self.status_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: green;")
-        else:
-            self.status_label.setText("Status: Stopped")
-            self.status_label.setStyleSheet("font-size: 14pt; font-weight: bold;")
-
-    def log(self, message):
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log_text.append(f"[{timestamp}] {message}")
-
-    def closeEvent(self, event):
-        if self.server_thread:
-            self.server_thread.stop()
-            self.server_thread.wait()
-        event.accept()
-
-    def quit_app(self):
-        self.close()
-
-def main():
-    app = QApplication(sys.argv)
-    app.setApplicationName("Wireless Display Receiver")
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec())
 
 if __name__ == '__main__':
-    main()
+    tray = TrayApp()
+    sys.exit(tray.run())
