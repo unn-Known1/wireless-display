@@ -1,0 +1,20 @@
+Source: wireless-display-receiver
+Section: network
+Priority: optional
+Maintainer: Wireless Display Team
+Build-Depends: python3, python3-pyqt6
+Standards-Version: 4.6.0
+
+Package: wireless-display-receiver
+Version: 1.0.0
+Architecture: amd64
+Depends: python3 (>= 3.8), python3-pyqt6 (>= 6.0)
+Description: Use Android TV as secondary display over WiFi
+ Virtual display receiver that streams desktop to Android TV via VNC protocol.
+ Works with Wireless Display TV app on Android TV.
+ .
+ Features:
+  - VNC server for remote display
+  - Easy setup with system tray
+  - Configurable resolution
+  - Auto-discovery support
